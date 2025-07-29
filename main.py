@@ -5,32 +5,14 @@ import aiohttp
 import asyncio
 import random
 import os
-from flask import Flask
-from threading import Thread
-
-# --- Web Server to Keep Bot Alive on Replit ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive and running."
-
-def run():
-  app.run(host='0.0.0.0', port=8080)
-
-def keep_alive():
-    t = Thread(target=run)
-    t.start()
 
 # --- Bot Setup ---
-# The token is loaded securely from Replit's Secrets.
+# The token is loaded from your host's environment variables (like Railway or Replit Secrets)
 try:
     BOT_TOKEN = os.environ['BOT_TOKEN']
 except KeyError:
-    print("ERROR: BOT_TOKEN not found in Replit Secrets!")
-    print("Please go to the Secrets (padlock icon) tab and add a new secret.")
-    print("KEY: BOT_TOKEN")
-    print("VALUE: YourDiscordBotToken")
+    print("ERROR: BOT_TOKEN environment variable not found!")
+    print("Please make sure you have set the BOT_TOKEN in your hosting service's secrets/variables.")
     exit()
 
 # Define the intents your bot needs.
@@ -42,7 +24,7 @@ intents.guilds = True
 # Create the bot instance with a command prefix and intents.
 bot = commands.Bot(command_prefix='?', intents=intents)
 
-# --- ADDED: A list of random replies for the specific user ---
+# --- List of random replies for the specific user ---
 RANDOM_REPLIES = [
     "My sensors indicate your input is... suboptimal.",
     "Analyzing message... Conclusion: irrelevant.",
@@ -147,11 +129,11 @@ async def round_timer(guild_id, seconds):
     if state and state.is_running and state.current_flag_country:
         country_name = state.current_flag_country['name']['common']
         channel = state.message_channel
-
+        
         await channel.send(f"Time's up! The correct answer was **{country_name}**. No one guessed in time, so the game has ended. Use `?flagstart` to play again.")
-
+        
         await show_leaderboard(channel, guild_id)
-
+        
         if guild_id in game_states:
             del game_states[guild_id]
 
@@ -161,11 +143,11 @@ async def on_ready():
     """Event that runs when the bot is connected and ready."""
     print(f'Logged in as {bot.user.name}')
     print('Bot is ready to accept commands.')
-
+    
     try:
         channel_id = 1347134723549302867
         channel = bot.get_channel(channel_id)
-
+        
         if channel:
             if channel.permissions_for(channel.guild.me).send_messages:
                 await channel.send("bot updated")
@@ -191,32 +173,22 @@ async def on_message(message):
         await message.reply(random.choice(RANDOM_REPLIES))
         return
 
-    # --- RACE CONDITION FIX ---
-    # The check `state.current_flag_country` is now the key to preventing multiple winners.
     if state and state.is_running and state.current_flag_country and message.channel == state.message_channel:
         guess = message.content.lower().strip()
         correct_answer_name = state.current_flag_country['name']['common'].lower()
 
         if guess == correct_answer_name:
-            # --- LOCKING MECHANISM ---
-            # 1. Cancel the timer for the round.
             if state.timer_task:
                 state.timer_task.cancel()
-
-            # 2. Store the correct answer before clearing it.
+            
             correct_country_info = state.current_flag_country
-
-            # 3. Immediately set current_flag_country to None. This is the "lock".
-            # Any other message arriving nanoseconds later will fail the outer `if` condition.
             state.current_flag_country = None
-            # --- END LOCK ---
 
-            # Now, proceed with awarding points and starting the next round safely.
             user = message.author
             state.scores[user.id] = state.scores.get(user.id, 0) + 1
             await message.add_reaction('✅')
             await message.channel.send(f"**{user.display_name}** guessed it right! The country was **{correct_country_info['name']['common']}**. They get 1 point!")
-
+            
             await show_leaderboard(message.channel, guild_id)
             await asyncio.sleep(3)
             await start_new_round(guild_id)
@@ -237,7 +209,7 @@ async def flag_start(ctx):
     state = game_states[guild_id]
     state.is_running = True
     state.message_channel = ctx.channel
-
+    
     await ctx.send("🎉 **Flag Quiz Started!** 🎉\nGet ready to guess the flags. The first flag will appear shortly.")
     await asyncio.sleep(2)
     await start_new_round(guild_id)
@@ -255,7 +227,7 @@ async def flag_stop(ctx):
 
     if state.timer_task:
         state.timer_task.cancel()
-
+    
     await ctx.send("🏁 **Flag Quiz Ended!** 🏁\nHere is the final leaderboard:")
     await show_leaderboard(ctx.channel, guild_id)
 
@@ -274,8 +246,7 @@ async def flag_skip(ctx):
 
     if state.timer_task:
         state.timer_task.cancel()
-
-    # We need to check if a country was set before trying to access it
+        
     if state.current_flag_country:
         correct_answer = state.current_flag_country['name']['common']
         await ctx.send(f"The flag has been skipped. The correct answer was **{correct_answer}**. Loading the next flag...")
@@ -288,10 +259,10 @@ async def flag_skip(ctx):
 @commands.has_permissions(manage_guild=True)
 async def force_update(ctx):
     """Simulates a more realistic bot update sequence."""
-
+    
     old_version = f"v{random.randint(1,3)}.{random.randint(0,9)}.{random.randint(0,9)}"
     new_version = f"v{random.randint(3,5)}.{random.randint(0,9)}.{random.randint(0,9)}-beta"
-
+    
     embed = discord.Embed(
         title="SYSTEM UPDATE IN PROGRESS",
         description=f"```ini\n[INFO] Remote update initiated by [{ctx.author.name}].\n[INFO] Current version: {old_version}```",
@@ -336,7 +307,6 @@ async def show_leaderboard(channel, guild_id):
     """Helper function to display the leaderboard."""
     state = game_states.get(guild_id)
     if not state or not state.scores:
-        # Don't send a message if there's no leaderboard to show.
         return
 
     sorted_scores = sorted(state.scores.items(), key=lambda item: item[1], reverse=True)
@@ -349,13 +319,13 @@ async def show_leaderboard(channel, guild_id):
             user_name = user.display_name
         except discord.NotFound:
             user_name = f"User (ID: {user_id})"
-
+        
         emoji = ""
         if i == 0: emoji = "🥇 "
         elif i == 1: emoji = "🥈 "
         elif i == 2: emoji = "🥉 "
         description += f"{emoji}**{user_name}**: {score} points\n"
-
+    
     embed.description = description
     await channel.send(embed=embed)
 
@@ -383,5 +353,4 @@ async def command_error(ctx, error):
 
 # --- Run the Bot ---
 if __name__ == "__main__":
-    keep_alive()  # Starts the web server
     bot.run(BOT_TOKEN)
