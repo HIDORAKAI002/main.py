@@ -284,6 +284,22 @@ async def difficulty(ctx, level: str):
     game_states[guild_id].difficulty = level
     await ctx.send(f"Game difficulty has been set to **{level}**. This will take effect on the next `?flagstart`.")
 
+@bot.command(name='flaghelp')
+async def flag_help(ctx):
+    """Displays a list of available commands for the flag game."""
+    embed = discord.Embed(
+        title="🚩 Flag Quiz Help 🚩",
+        description="Here are the available commands for the flag game:",
+        color=discord.Color.from_rgb(88, 101, 242) # Discord Blurple
+    )
+    embed.add_field(name="`?flagstart`", value="Starts a new flag quiz game.\n*(Requires 'Manage Server' permissions)*", inline=False)
+    embed.add_field(name="`?flagstop`", value="Stops the current game.\n*(Requires 'Manage Server' permissions)*", inline=False)
+    embed.add_field(name="`?flagskip`", value="Skips the current flag and shows a new one.\n*(Requires 'Manage Server' permissions)*", inline=False)
+    embed.add_field(name="`?difficulty <level>`", value="Sets the game difficulty. Options: `easy`, `normal`, `hard`.\n*(Requires 'Manage Server' permissions)*", inline=False)
+    embed.add_field(name="`?leaderboard`", value="Shows the current game's leaderboard.", inline=False)
+    embed.set_footer(text="Have fun guessing!")
+    await ctx.send(embed=embed)
+
 # --- Admin Commands ---
 @bot.command(name='forceupdate')
 @commands.has_permissions(manage_guild=True)
@@ -436,6 +452,7 @@ async def admin_command_error(ctx, error):
 @flag_skip.error
 @force_update.error
 @difficulty.error
+@flag_help.error
 async def command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("You don't have the required permissions to use this command.")
@@ -471,7 +488,7 @@ async def show_leaderboard(channel, guild_id):
         emoji = ""
         if i == 0: emoji = "🥇 "
         elif i == 1: emoji = "🥈 "
-        elif i == 2: emoji = "� "
+        elif i == 2: emoji = "🥉 "
         description += f"{emoji}**{user_name}**: {score} points\n"
     embed.description = description
     await channel.send(embed=embed)
