@@ -20,6 +20,7 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True 
 intents.guilds = True
+intents.members = True # Required for fetching members for the gban command
 
 # Create the bot instance with a command prefix and intents.
 bot = commands.Bot(command_prefix='?', intents=intents)
@@ -210,7 +211,7 @@ async def flag_start(ctx):
     state.is_running = True
     state.message_channel = ctx.channel
     
-    await ctx.send("🎉 **Flag Quiz Started!** 🎉\nGet ready to guess the flags. The first flag will appear shortly.")
+    await ctx.send("🎉 **Flag Quiz Started!** �\nGet ready to guess the flags. The first flag will appear shortly.")
     await asyncio.sleep(2)
     await start_new_round(guild_id)
 
@@ -302,6 +303,74 @@ async def force_update(ctx):
     embed.description = f"```ini\n[SUCCESS] All systems have been updated to version [{new_version}].\n[INFO] Bot is now fully operational.```"
     await msg.edit(embed=embed)
 
+# --- NEW GBAN COMMAND ---
+@bot.command(name='gban')
+async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided."):
+    """Globally bans a user from all servers the bot is in."""
+    # Check if the command issuer is the authorized user
+    if ctx.author.id != 794610250375364629:
+        return await ctx.send("`[ACCESS DENIED]` This command is restricted.")
+
+    if member.id == ctx.author.id:
+        return await ctx.send("You cannot ban yourself.")
+    
+    if member.id == bot.user.id:
+        return await ctx.send("I cannot ban myself.")
+
+    success_guilds = []
+    failed_guilds = []
+
+    await ctx.send(f"Initiating global ban for **{member.name}** (`{member.id}`). This may take a moment...")
+
+    # Iterate through all guilds the bot is a member of
+    for guild in bot.guilds:
+        # Check if the bot has ban permissions in the guild
+        if not guild.me.guild_permissions.ban_members:
+            failed_guilds.append(f"**{guild.name}**: Missing 'Ban Members' permission.")
+            continue
+        
+        # Check if the member is in the guild
+        target_member = guild.get_member(member.id)
+        if target_member:
+            # Check if the bot's role is high enough to ban the member
+            if guild.me.top_role <= target_member.top_role:
+                failed_guilds.append(f"**{guild.name}**: My role is not high enough to ban this user.")
+                continue
+        
+        try:
+            # Attempt to ban the user
+            await guild.ban(member, reason=f"Global Ban issued by {ctx.author.name} ({ctx.author.id}). Reason: {reason}")
+            success_guilds.append(f"**{guild.name}**")
+        except discord.Forbidden:
+            failed_guilds.append(f"**{guild.name}**: An unexpected `Forbidden` error occurred.")
+        except discord.HTTPException as e:
+            failed_guilds.append(f"**{guild.name}**: Failed due to an API error: {e}")
+        
+        # Add a small delay to avoid hitting rate limits
+        await asyncio.sleep(1)
+
+    # Create and send the final report
+    embed = discord.Embed(title="Global Ban Report", color=discord.Color.red())
+    embed.add_field(name="Target User", value=f"{member.mention} (`{member.id}`)", inline=False)
+    
+    if success_guilds:
+        embed.add_field(name="✅ Successfully Banned In", value="\n".join(success_guilds), inline=False)
+    
+    if failed_guilds:
+        embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds), inline=False)
+        
+    await ctx.send(embed=embed)
+
+@gban.error
+async def gban_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("You must specify a user to ban. Usage: `?gban @user [reason]`")
+    elif isinstance(error, commands.MemberNotFound):
+        await ctx.send(f"Could not find a user named '{error.argument}'. Please check the name or use the user's ID.")
+    else:
+        await ctx.send("An unexpected error occurred while processing the gban command.")
+        print(f"Error in gban command: {error}")
+
 
 async def show_leaderboard(channel, guild_id):
     """Helper function to display the leaderboard."""
@@ -354,3 +423,4 @@ async def command_error(ctx, error):
 # --- Run the Bot ---
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
+�
