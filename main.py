@@ -322,15 +322,39 @@ async def force_update(ctx):
 
 @bot.command(name='gban')
 async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided."):
-    """Globally bans a user from all servers the bot is in."""
+    """Globally bans a user from all servers the bot is in with a cool animation."""
     if ctx.author.id != 794610250375364629:
         return await ctx.send("`[ACCESS DENIED]` This command is restricted.")
     if member.id == ctx.author.id or member.id == bot.user.id:
         return await ctx.send("Cannot target self.")
 
+    # --- Animated Sequence Start ---
+    embed = discord.Embed(title="GLOBAL BANISHMENT PROTOCOL", color=discord.Color.dark_red())
+    embed.set_author(name="SYSTEM ALERT: THREAT DETECTED")
+    embed.add_field(name="Status", value="`Initializing...`", inline=False)
+    embed.set_footer(text="Propagating changes across the network...")
+    msg = await ctx.send(embed=embed)
+    await asyncio.sleep(2)
+
+    # Target Acquisition
+    embed.clear_fields()
+    embed.add_field(name="Status", value="`Acquiring target telemetry...`", inline=False)
+    embed.add_field(name="Target Locked", value=f"{member.mention} (`{member.id}`)")
+    embed.add_field(name="Reason", value=f"`{reason}`")
+    await msg.edit(embed=embed)
+    await asyncio.sleep(2.5)
+
+    # Network Propagation
     success_guilds, failed_guilds = [], []
-    await ctx.send(f"Initiating global ban for **{member.name}** (`{member.id}`). This may take a moment...")
-    for guild in bot.guilds:
+    total_guilds = len(bot.guilds)
+    for i, guild in enumerate(bot.guilds):
+        embed.clear_fields()
+        embed.add_field(name="Status", value=f"`Propagating ban signature...`\n`Processing Guild {i+1}/{total_guilds}`", inline=False)
+        embed.add_field(name="Current Node", value=f"**{guild.name}**", inline=False)
+        await msg.edit(embed=embed)
+        await asyncio.sleep(0.5)
+
+        # Actual ban logic
         if not guild.me.guild_permissions.ban_members:
             failed_guilds.append(f"**{guild.name}**: Missing 'Ban Members' permission.")
             continue
@@ -343,14 +367,22 @@ async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided
             success_guilds.append(f"**{guild.name}**")
         except Exception as e:
             failed_guilds.append(f"**{guild.name}**: Failed - {type(e).__name__}")
-        await asyncio.sleep(1)
-    embed = discord.Embed(title="Global Ban Report", color=discord.Color.red())
+        await asyncio.sleep(1) # Dramatic pause for each server
+
+    # Final Report
+    embed.title = "GLOBAL BANISHMENT COMPLETE"
+    embed.set_author(name="SYSTEM REPORT")
+    embed.clear_fields()
     embed.add_field(name="Target User", value=f"{member.mention} (`{member.id}`)", inline=False)
+    embed.color = discord.Color.green() if not failed_guilds else discord.Color.orange()
+    
     if success_guilds:
-        embed.add_field(name="✅ Banned In", value="\n".join(success_guilds), inline=False)
+        embed.add_field(name="✅ Banned In", value="\n".join(success_guilds) or "None", inline=False)
     if failed_guilds:
-        embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds), inline=False)
-    await ctx.send(embed=embed)
+        embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds) or "None", inline=False)
+        
+    await msg.edit(embed=embed)
+
 
 @bot.command(name='gunban')
 async def gunban(ctx, user_id: int, *, reason: str = "No reason provided."):
@@ -439,7 +471,7 @@ async def show_leaderboard(channel, guild_id):
         emoji = ""
         if i == 0: emoji = "🥇 "
         elif i == 1: emoji = "🥈 "
-        elif i == 2: emoji = "🥉 "
+        elif i == 2: emoji = "� "
         description += f"{emoji}**{user_name}**: {score} points\n"
     embed.description = description
     await channel.send(embed=embed)
