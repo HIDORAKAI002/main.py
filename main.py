@@ -20,7 +20,8 @@ intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True 
 intents.guilds = True
-intents.members = True # Required for fetching members for the gban command
+intents.members = True # Required for fetching members
+intents.bans = True # Required for fetching ban list for gunban
 
 # Create the bot instance with a command prefix and intents.
 bot = commands.Bot(command_prefix='?', intents=intents)
@@ -74,10 +75,18 @@ class GameState:
         self.current_flag_country = None
         self.timer_task = None
         self.message_channel = None
+        self.difficulty = "normal" # NEW: Difficulty setting per server
 
 # --- Helper Functions ---
-async def get_random_country():
-    """Fetches a list of countries with population > 1M and returns a random one."""
+async def get_random_country(difficulty="normal"):
+    """Fetches a list of countries based on difficulty and returns a random one."""
+    population_filter = 0
+    if difficulty == "easy":
+        population_filter = 15000000  # Countries with > 15M people
+    elif difficulty == "normal":
+        population_filter = 1000000   # Countries with > 1M people
+    # "hard" difficulty has no population filter (population_filter = 0)
+
     try:
         async with aiohttp.ClientSession() as session:
             api_url = 'https://restcountries.com/v3.1/all?fields=name,flags,cca2,population'
@@ -88,7 +97,7 @@ async def get_random_country():
                         c for c in countries 
                         if 'common' in c.get('name', {}) 
                         and 'png' in c.get('flags', {}) 
-                        and c.get('population', 0) > 1000000
+                        and c.get('population', 0) > population_filter
                     ]
                     return random.choice(valid_countries) if valid_countries else None
                 else:
@@ -104,14 +113,15 @@ async def start_new_round(guild_id):
     if not state or not state.is_running:
         return
 
-    country = await get_random_country()
+    # Use the server's set difficulty
+    country = await get_random_country(state.difficulty)
     if not country:
-        await state.message_channel.send("Could not fetch a new flag. Please try again later.")
+        await state.message_channel.send(f"Could not fetch a new flag for **{state.difficulty}** difficulty. Please try again later.")
         return
 
     state.current_flag_country = country
     country_name = country['name']['common']
-    print(f"New round for guild {guild_id}: The country is {country_name}")
+    print(f"New round for guild {guild_id} (Difficulty: {state.difficulty}): The country is {country_name}")
 
     embed = discord.Embed(
         title="Guess the Flag!",
@@ -196,7 +206,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# --- Bot Commands ---
+# --- Game Commands ---
 @bot.command(name='flagstart')
 @commands.has_permissions(manage_guild=True)
 async def flag_start(ctx):
@@ -206,12 +216,15 @@ async def flag_start(ctx):
         await ctx.send("A game is already running in this server!")
         return
 
-    game_states[guild_id] = GameState()
+    # Initialize game state for the guild if it doesn't exist
+    if guild_id not in game_states:
+        game_states[guild_id] = GameState()
+    
     state = game_states[guild_id]
     state.is_running = True
     state.message_channel = ctx.channel
     
-    await ctx.send("🎉 **Flag Quiz Started!** �\nGet ready to guess the flags. The first flag will appear shortly.")
+    await ctx.send(f"🎉 **Flag Quiz Started!** (Difficulty: {state.difficulty}) 🎉\nGet ready to guess the flags. The first flag will appear shortly.")
     await asyncio.sleep(2)
     await start_new_round(guild_id)
 
@@ -256,26 +269,34 @@ async def flag_skip(ctx):
 
     await start_new_round(guild_id)
 
+@bot.command(name='difficulty')
+@commands.has_permissions(manage_guild=True)
+async def difficulty(ctx, level: str):
+    """Sets the game difficulty for this server. Options: easy, normal, hard."""
+    level = level.lower()
+    if level not in ['easy', 'normal', 'hard']:
+        return await ctx.send("Invalid difficulty. Please choose from `easy`, `normal`, or `hard`.")
+
+    guild_id = ctx.guild.id
+    if guild_id not in game_states:
+        game_states[guild_id] = GameState()
+    
+    game_states[guild_id].difficulty = level
+    await ctx.send(f"Game difficulty has been set to **{level}**. This will take effect on the next `?flagstart`.")
+
+# --- Admin Commands ---
 @bot.command(name='forceupdate')
 @commands.has_permissions(manage_guild=True)
 async def force_update(ctx):
     """Simulates a more realistic bot update sequence."""
-    
     old_version = f"v{random.randint(1,3)}.{random.randint(0,9)}.{random.randint(0,9)}"
     new_version = f"v{random.randint(3,5)}.{random.randint(0,9)}.{random.randint(0,9)}-beta"
-    
-    embed = discord.Embed(
-        title="SYSTEM UPDATE IN PROGRESS",
-        description=f"```ini\n[INFO] Remote update initiated by [{ctx.author.name}].\n[INFO] Current version: {old_version}```",
-        color=discord.Color.blue()
-    )
+    embed = discord.Embed(title="SYSTEM UPDATE IN PROGRESS", description=f"```ini\n[INFO] Remote update initiated by [{ctx.author.name}].\n[INFO] Current version: {old_version}```", color=discord.Color.blue())
     msg = await ctx.send(embed=embed)
     await asyncio.sleep(2)
-
     embed.description = f"```ini\n[INFO] Fetching update manifest for [{new_version}] from primary node...\n[NET] Secure connection established.```"
     await msg.edit(embed=embed)
     await asyncio.sleep(2)
-
     embed.color = discord.Color.orange()
     for i in range(11):
         progress = i * 10
@@ -284,120 +305,113 @@ async def force_update(ctx):
         embed.description = f"```ini\n[NET] Downloading package [core-geodata-{new_version}.pkg]...\n\n[{bar}] {progress}% ({size}/24.7 MB)```"
         await msg.edit(embed=embed)
         await asyncio.sleep(0.4)
-
     await asyncio.sleep(1.5)
     embed.description = f"```ini\n[SYS] Download complete. Decompressing assets...\n[SYS] Applying patches to core modules...```"
     await msg.edit(embed=embed)
     await asyncio.sleep(2)
-
     embed.description = f"```diff\n--- Applying Patches ---\n+ Patched 'flag_guesser_heuristic.dll'\n+ Patched 'anti_cheat_subsystem.dll'\n+ Patched 'user_interaction_matrix.dll'```"
     await msg.edit(embed=embed)
     await asyncio.sleep(2.5)
-
     embed.color = discord.Color.green()
     embed.description = f"```ini\n[DB] Verifying data integrity... Hash match OK.\n[SYS] Restarting core services...```"
     await msg.edit(embed=embed)
     await asyncio.sleep(2)
-
     embed.title = "SYSTEM UPDATE COMPLETE"
     embed.description = f"```ini\n[SUCCESS] All systems have been updated to version [{new_version}].\n[INFO] Bot is now fully operational.```"
     await msg.edit(embed=embed)
 
-# --- NEW GBAN COMMAND ---
 @bot.command(name='gban')
 async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided."):
     """Globally bans a user from all servers the bot is in."""
-    # Check if the command issuer is the authorized user
     if ctx.author.id != 794610250375364629:
         return await ctx.send("`[ACCESS DENIED]` This command is restricted.")
+    if member.id == ctx.author.id or member.id == bot.user.id:
+        return await ctx.send("Cannot target self.")
 
-    if member.id == ctx.author.id:
-        return await ctx.send("You cannot ban yourself.")
-    
-    if member.id == bot.user.id:
-        return await ctx.send("I cannot ban myself.")
-
-    success_guilds = []
-    failed_guilds = []
-
+    success_guilds, failed_guilds = [], []
     await ctx.send(f"Initiating global ban for **{member.name}** (`{member.id}`). This may take a moment...")
-
-    # Iterate through all guilds the bot is a member of
     for guild in bot.guilds:
-        # Check if the bot has ban permissions in the guild
         if not guild.me.guild_permissions.ban_members:
             failed_guilds.append(f"**{guild.name}**: Missing 'Ban Members' permission.")
             continue
-        
-        # Check if the member is in the guild
         target_member = guild.get_member(member.id)
-        if target_member:
-            # Check if the bot's role is high enough to ban the member
-            if guild.me.top_role <= target_member.top_role:
-                failed_guilds.append(f"**{guild.name}**: My role is not high enough to ban this user.")
-                continue
-        
+        if target_member and guild.me.top_role <= target_member.top_role:
+            failed_guilds.append(f"**{guild.name}**: My role is not high enough.")
+            continue
         try:
-            # Attempt to ban the user
-            await guild.ban(member, reason=f"Global Ban issued by {ctx.author.name} ({ctx.author.id}). Reason: {reason}")
+            await guild.ban(member, reason=f"Global Ban by {ctx.author} | Reason: {reason}")
             success_guilds.append(f"**{guild.name}**")
-        except discord.Forbidden:
-            failed_guilds.append(f"**{guild.name}**: An unexpected `Forbidden` error occurred.")
-        except discord.HTTPException as e:
-            failed_guilds.append(f"**{guild.name}**: Failed due to an API error: {e}")
-        
-        # Add a small delay to avoid hitting rate limits
+        except Exception as e:
+            failed_guilds.append(f"**{guild.name}**: Failed - {type(e).__name__}")
         await asyncio.sleep(1)
-
-    # Create and send the final report
     embed = discord.Embed(title="Global Ban Report", color=discord.Color.red())
     embed.add_field(name="Target User", value=f"{member.mention} (`{member.id}`)", inline=False)
-    
     if success_guilds:
-        embed.add_field(name="✅ Successfully Banned In", value="\n".join(success_guilds), inline=False)
-    
+        embed.add_field(name="✅ Banned In", value="\n".join(success_guilds), inline=False)
     if failed_guilds:
         embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds), inline=False)
-        
     await ctx.send(embed=embed)
 
-@gban.error
-async def gban_error(ctx, error):
-    if isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("You must specify a user to ban. Usage: `?gban @user [reason]`")
-    elif isinstance(error, commands.MemberNotFound):
-        await ctx.send(f"Could not find a user named '{error.argument}'. Please check the name or use the user's ID.")
-    else:
-        await ctx.send("An unexpected error occurred while processing the gban command.")
-        print(f"Error in gban command: {error}")
-
-
-async def show_leaderboard(channel, guild_id):
-    """Helper function to display the leaderboard."""
-    state = game_states.get(guild_id)
-    if not state or not state.scores:
-        return
-
-    sorted_scores = sorted(state.scores.items(), key=lambda item: item[1], reverse=True)
-
-    embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
-    description = ""
-    for i, (user_id, score) in enumerate(sorted_scores):
-        try:
-            user = await bot.fetch_user(user_id)
-            user_name = user.display_name
-        except discord.NotFound:
-            user_name = f"User (ID: {user_id})"
-        
-        emoji = ""
-        if i == 0: emoji = "🥇 "
-        elif i == 1: emoji = "🥈 "
-        elif i == 2: emoji = "🥉 "
-        description += f"{emoji}**{user_name}**: {score} points\n"
+@bot.command(name='gunban')
+async def gunban(ctx, user_id: int, *, reason: str = "No reason provided."):
+    """Globally unbans a user from all servers the bot is in."""
+    if ctx.author.id != 794610250375364629:
+        return await ctx.send("`[ACCESS DENIED]` This command is restricted.")
     
-    embed.description = description
-    await channel.send(embed=embed)
+    try:
+        user_to_unban = await bot.fetch_user(user_id)
+    except discord.NotFound:
+        return await ctx.send("Could not find a user with that ID.")
 
+    success_guilds, failed_guilds = [], []
+    await ctx.send(f"Initiating global unban for **{user_to_unban.name}** (`{user_to_unban.id}`). This may take a moment...")
+    for guild in bot.guilds:
+        if not guild.me.guild_permissions.ban_members:
+            failed_guilds.append(f"**{guild.name}**: Missing 'Ban Members' permission.")
+            continue
+        try:
+            await guild.unban(user_to_unban, reason=f"Global Unban by {ctx.author} | Reason: {reason}")
+            success_guilds.append(f"**{guild.name}**")
+        except discord.NotFound:
+            failed_guilds.append(f"**{guild.name}**: User was not banned.")
+        except Exception as e:
+            failed_guilds.append(f"**{guild.name}**: Failed - {type(e).__name__}")
+        await asyncio.sleep(1)
+    embed = discord.Embed(title="Global Unban Report", color=discord.Color.green())
+    embed.add_field(name="Target User", value=f"{user_to_unban.name} (`{user_to_unban.id}`)", inline=False)
+    if success_guilds:
+        embed.add_field(name="✅ Unbanned In", value="\n".join(success_guilds), inline=False)
+    if failed_guilds:
+        embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds), inline=False)
+    await ctx.send(embed=embed)
+
+# --- Error Handling ---
+@gban.error
+@gunban.error
+async def admin_command_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send(f"Missing argument. Usage: `?{ctx.command.name} <user> [reason]`")
+    elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)):
+        await ctx.send(f"Could not find a user named '{error.argument}'. Please check the name or use the user's ID.")
+    elif isinstance(error, commands.BadArgument):
+        await ctx.send("Invalid user ID provided. Please make sure it's a number.")
+    else:
+        await ctx.send("An unexpected error occurred while processing this command.")
+        print(f"Error in {ctx.command.name} command: {error}")
+
+@flag_start.error
+@flag_stop.error
+@flag_skip.error
+@force_update.error
+@difficulty.error
+async def command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("You don't have the required permissions to use this command.")
+    else:
+        print(f"An error occurred: {error}")
+        await ctx.send("An unexpected error occurred. Please check the console.")
+
+# --- Leaderboard Command ---
 @bot.command(name='leaderboard')
 async def leaderboard_command(ctx):
     """Displays the current leaderboard."""
@@ -408,17 +422,27 @@ async def leaderboard_command(ctx):
         return
     await show_leaderboard(ctx.channel, guild_id)
 
-# --- Error Handling ---
-@flag_start.error
-@flag_stop.error
-@flag_skip.error
-@force_update.error
-async def command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You don't have the required permissions to use this command.")
-    else:
-        print(f"An error occurred: {error}")
-        await ctx.send("An unexpected error occurred. Please check the console.")
+async def show_leaderboard(channel, guild_id):
+    """Helper function to display the leaderboard."""
+    state = game_states.get(guild_id)
+    if not state or not state.scores:
+        return
+    sorted_scores = sorted(state.scores.items(), key=lambda item: item[1], reverse=True)
+    embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
+    description = ""
+    for i, (user_id, score) in enumerate(sorted_scores):
+        try:
+            user = await bot.fetch_user(user_id)
+            user_name = user.display_name
+        except discord.NotFound:
+            user_name = f"User (ID: {user_id})"
+        emoji = ""
+        if i == 0: emoji = "🥇 "
+        elif i == 1: emoji = "🥈 "
+        elif i == 2: emoji = "🥉 "
+        description += f"{emoji}**{user_name}**: {score} points\n"
+    embed.description = description
+    await channel.send(embed=embed)
 
 # --- Run the Bot ---
 if __name__ == "__main__":
