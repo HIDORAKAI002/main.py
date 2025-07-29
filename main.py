@@ -210,7 +210,7 @@ async def flag_start(ctx):
     state.is_running = True
     state.message_channel = ctx.channel
     
-    await ctx.send("🎉 **Flag Quiz Started!** �\nGet ready to guess the flags. The first flag will appear shortly.")
+    await ctx.send("🎉 **Flag Quiz Started!** 🎉\nGet ready to guess the flags. The first flag will appear shortly.")
     await asyncio.sleep(2)
     await start_new_round(guild_id)
 
