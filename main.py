@@ -423,4 +423,3 @@ async def command_error(ctx, error):
 # --- Run the Bot ---
 if __name__ == "__main__":
     bot.run(BOT_TOKEN)
-�
