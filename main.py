@@ -21,7 +21,10 @@ intents.guilds = True
 intents.members = True
 intents.bans = True
 
+# We need to define the owner ID for the new command to work
+# It will default to the person who owns the bot application on the Discord Developer Portal
 bot = commands.Bot(command_prefix='?', intents=intents, help_command=None)
+
 
 # --- List of random replies for the specific user ---
 RANDOM_REPLIES = [
@@ -38,18 +41,15 @@ class GameState:
     """A class to hold the state of a game in a specific server."""
     def __init__(self):
         self.is_running = False
-        # MODIFIED: Changed scores to a dict holding more player data
         self.player_stats = {}  # {user_id: {'score': 0, 'xp': 0, 'level': 0}}
         self.current_flag_country = None
         self.timer_task = None
         self.message_channel = None
         self.difficulty = "normal"
-        # ADDED: Dictionary to track infected users
         self.infected_users = {} # {user_id: expiry_timestamp}
 
 # --- Helper Functions ---
 async def get_random_country(difficulty="normal"):
-    # THIS FUNCTION IS UNCHANGED
     population_filter = 0
     if difficulty == "easy": population_filter = 15000000
     elif difficulty == "normal": population_filter = 1000000
@@ -69,7 +69,6 @@ async def get_random_country(difficulty="normal"):
         return None
 
 async def start_new_round(guild_id):
-    # THIS FUNCTION IS UNCHANGED
     state = game_states.get(guild_id)
     if not state or not state.is_running: return
 
@@ -89,7 +88,6 @@ async def start_new_round(guild_id):
     state.timer_task = bot.loop.create_task(round_timer(guild_id, 60))
 
 async def round_timer(guild_id, seconds):
-    # THIS FUNCTION IS UNCHANGED (but now stops the game fully)
     await asyncio.sleep(seconds)
     state = game_states.get(guild_id)
     if state and state.is_running and state.current_flag_country:
@@ -102,10 +100,8 @@ async def round_timer(guild_id, seconds):
 # --- Bot Events ---
 @bot.event
 async def on_ready():
-    # MODIFIED: Starts the new infection checker task
     print(f'Logged in as {bot.user.name}')
     check_infections_task.start()
-    # (Your original on_ready message logic is unchanged)
     try:
         channel = bot.get_channel(1347134723549302867)
         if channel and channel.permissions_for(channel.guild.me).send_messages:
@@ -120,7 +116,6 @@ async def on_message(message):
     guild_id = message.guild.id
     state = game_states.get(guild_id)
 
-    # (Your original user-trolling logic is unchanged)
     if message.author.id == 1342499092739391538 and state and state.is_running:
         await message.reply(random.choice(RANDOM_REPLIES))
         return
@@ -131,14 +126,11 @@ async def on_message(message):
         user = message.author
 
         if guess == correct_answer_name:
-            # (Your original timer logic is unchanged)
             if state.timer_task: state.timer_task.cancel()
             
             correct_country_info = state.current_flag_country
             state.current_flag_country = None
 
-            # --- ADDED: XP, Leveling, and Infection Cure Logic ---
-            # Initialize player stats if they don't exist
             if user.id not in state.player_stats:
                 state.player_stats[user.id] = {'score': 0, 'xp': 0, 'level': 0}
             
@@ -156,56 +148,54 @@ async def on_message(message):
             if player_data['level'] > old_level:
                 await message.channel.send(f"**LEVEL UP!** {user.display_name} has reached **Level {player_data['level']}**!")
 
-            # Cure infection on win
             if user.id in state.infected_users:
                 del state.infected_users[user.id]
                 try:
-                    # Attempt to revert nickname. We don't store original, so we just remove the nick.
                     await user.edit(nick=None) 
                     await message.channel.send(f"✨ {user.display_name} has been cured of the flag infection!")
                 except discord.Forbidden: pass
             
-            # (Your original game flow is unchanged)
             await show_leaderboard(message.channel, guild_id)
             await asyncio.sleep(3)
             await start_new_round(guild_id)
 
-        # --- ADDED: Infection Logic for Incorrect Guesses ---
         else:
             if user.id not in state.infected_users:
                 try:
                     await user.edit(nick=f"{user.display_name} 🦠")
                     state.infected_users[user.id] = datetime.utcnow() + timedelta(minutes=30)
                     await message.add_reaction('🦠')
-                except discord.Forbidden: pass # Can't infect if permissions are missing
+                except discord.Forbidden:
+                    await message.channel.send(f"**Permissions Error!** I can't apply the infection because I'm missing the `Manage Nicknames` permission.")
+                    state.infected_users[user.id] = datetime.utcnow() + timedelta(minutes=30)
+                except Exception as e:
+                    print(f"An unexpected error occurred during infection: {e}")
 
     await bot.process_commands(message)
 
-# --- NEW: Background task to check for expired infections ---
 @tasks.loop(minutes=1)
 async def check_infections_task():
     now = datetime.utcnow()
-    for guild_id, state in game_states.items():
-        # Use list comprehension to avoid dictionary size change during iteration
-        expired = [uid for uid, expiry in state.infected_users.items() if now > expiry]
+    for guild_id, state in list(game_states.items()):
+        if not state.is_running: continue
+        expired = [uid for uid, expiry in list(state.infected_users.items()) if now > expiry]
         for user_id in expired:
             del state.infected_users[user_id]
             try:
                 guild = bot.get_guild(guild_id)
                 if guild:
                     member = await guild.fetch_member(user_id)
-                    await member.edit(nick=None) # Revert nick
+                    await member.edit(nick=None)
                     print(f"Cured {member.display_name} in {guild.name} via timeout.")
             except Exception as e:
                 print(f"Error during infection cure: {e}")
 
 
-# --- Commands (Originals are INTACT, New ones are ADDED) ---
+# --- Commands ---
 
 @bot.command(name='flagstart')
 @commands.has_permissions(manage_guild=True)
 async def flag_start(ctx):
-    # THIS COMMAND IS UNCHANGED
     guild_id = ctx.guild.id
     if guild_id in game_states and game_states[guild_id].is_running:
         return await ctx.send("A game is already running in this server!")
@@ -221,7 +211,6 @@ async def flag_start(ctx):
 @bot.command(name='flagstop')
 @commands.has_permissions(manage_guild=True)
 async def flag_stop(ctx):
-    # THIS COMMAND IS UNCHANGED
     guild_id = ctx.guild.id
     state = game_states.get(guild_id)
     if not state or not state.is_running:
@@ -234,7 +223,6 @@ async def flag_stop(ctx):
 @bot.command(name='flagskip')
 @commands.has_permissions(manage_guild=True)
 async def flag_skip(ctx):
-    # THIS COMMAND IS UNCHANGED
     guild_id = ctx.guild.id
     state = game_states.get(guild_id)
     if not state or not state.is_running:
@@ -250,7 +238,6 @@ async def flag_skip(ctx):
 @bot.command(name='difficulty')
 @commands.has_permissions(manage_guild=True)
 async def difficulty(ctx, level: str):
-    # THIS COMMAND IS UNCHANGED
     level = level.lower()
     if level not in ['easy', 'normal', 'hard']:
         return await ctx.send("Invalid difficulty. Please choose from `easy`, `normal`, or `hard`.")
@@ -263,14 +250,11 @@ async def difficulty(ctx, level: str):
 
 @bot.command(name='leaderboard')
 async def leaderboard_command(ctx):
-    # THIS COMMAND IS UNCHANGED
     guild_id = ctx.guild.id
     state = game_states.get(guild_id)
     if not state or not state.is_running:
         return await ctx.send("No game is running. Start one with `?flagstart`.")
     await show_leaderboard(ctx.channel, guild_id)
-
-# --- ADDED: New Fun Commands ---
 
 @bot.command(name="profile", aliases=["stats", "level"])
 async def profile(ctx, member: discord.Member = None):
@@ -318,22 +302,19 @@ async def server_lore(ctx):
     lore = f"In ancient server history, **{random.choice(events)}** between **{user1.display_name}** and **{user2.display_name}** concluded, {random.choice(outcomes)}."
     await ctx.send(f"📜 A page from the archives reveals...\n\n{lore}")
 
-# --- MODIFIED: Help Command ---
 @bot.command(name='flaghelp')
 async def flag_help(ctx):
     embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", description="Here are the available commands for the flag game:", color=discord.Color.blurple())
     embed.add_field(name="Game Commands", value="`?flagstart`\n`?flagstop`\n`?flagskip`\n`?leaderboard`", inline=True)
     embed.add_field(name="Fun Commands", value="`?profile [@user]`\n`?height [@user]`\n`?serverlore` (Lvl 3+)", inline=True)
     embed.add_field(name="Settings", value="`?difficulty <level>` (easy, normal, hard)", inline=False)
-    embed.set_footer(text="Admin commands (?gban, ?forceupdate) are restricted and hidden.")
+    embed.set_footer(text="Admin commands (?gban, ?gannounce) are restricted and hidden.")
     await ctx.send(embed=embed)
 
-
-# --- Admin Commands (INTACT) ---
+# --- Admin Commands ---
 @bot.command(name='forceupdate')
 @commands.has_permissions(manage_guild=True)
 async def force_update(ctx):
-    # THIS COMMAND IS UNCHANGED
     old_version, new_version = f"v{random.randint(1,3)}.{random.randint(0,9)}.{random.randint(0,9)}", f"v{random.randint(3,5)}.{random.randint(0,9)}.{random.randint(0,9)}-beta"
     embed = discord.Embed(title="SYSTEM UPDATE IN PROGRESS", description=f"```ini\n[INFO] Remote update initiated by [{ctx.author.name}].\n[INFO] Current version: {old_version}```", color=discord.Color.blue())
     msg = await ctx.send(embed=embed)
@@ -348,7 +329,6 @@ async def force_update(ctx):
 
 @bot.command(name='gban')
 async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided."):
-    # THIS COMMAND IS UNCHANGED
     if ctx.author.id != 794610250375364629: return await ctx.send("`[ACCESS DENIED]`")
     if member.id == ctx.author.id or member.id == bot.user.id: return await ctx.send("Cannot target self.")
     embed = discord.Embed(title="GLOBAL BANISHMENT PROTOCOL", color=discord.Color.dark_red()); embed.set_author(name="SYSTEM ALERT: THREAT DETECTED"); embed.add_field(name="Status", value="`Initializing...`", inline=False); msg = await ctx.send(embed=embed)
@@ -365,7 +345,6 @@ async def gban(ctx, member: discord.Member, *, reason: str = "No reason provided
 
 @bot.command(name='gunban')
 async def gunban(ctx, user_id: int, *, reason: str = "No reason provided."):
-    # THIS COMMAND IS UNCHANGED
     if ctx.author.id != 794610250375364629: return await ctx.send("`[ACCESS DENIED]`")
     try: user_to_unban = await bot.fetch_user(user_id)
     except discord.NotFound: return await ctx.send("Could not find a user with that ID.")
@@ -379,32 +358,81 @@ async def gunban(ctx, user_id: int, *, reason: str = "No reason provided."):
     if failed_guilds: embed.add_field(name="❌ Failed In", value="\n".join(failed_guilds), inline=False)
     await ctx.send(embed=embed)
 
-# --- Helper function for leaderboard (INTACT) ---
+#==============================================================#
+#--- NEW FEATURE ADDED HERE ---
+#==============================================================#
+@bot.command(name='gannounce')
+@commands.is_owner() # This ensures only the bot owner can use this command
+async def global_announce(ctx, *, message: str):
+    """Sends an announcement to every server the bot is in, pinging mods."""
+    
+    success_count = 0
+    fail_count = 0
+    
+    embed = discord.Embed(title="Global Announcement", description=message, color=discord.Color.blue())
+    embed.set_author(name=f"Announcement from {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+    embed.set_footer(text="This is a global message sent to all servers.")
+
+    await ctx.send(f"Starting global announcement to {len(bot.guilds)} servers. This may take a moment...")
+
+    for guild in bot.guilds:
+        # Find a suitable channel to post in
+        target_channel = None
+        for channel in guild.text_channels:
+            if channel.permissions_for(guild.me).send_messages:
+                target_channel = channel
+                break # Found a valid channel, stop looking
+
+        if not target_channel:
+            print(f"Failed to send to '{guild.name}': No channel with send permissions.")
+            fail_count += 1
+            continue
+
+        # Find all members with 'Manage Messages' permission
+        mods_to_ping = [
+            member.mention for member in guild.members 
+            if not member.bot and member.guild_permissions.manage_messages
+        ]
+        
+        ping_string = " ".join(mods_to_ping) if mods_to_ping else "Attention Moderators,"
+
+        try:
+            await target_channel.send(content=ping_string, embed=embed)
+            success_count += 1
+            print(f"Successfully sent announcement to '{guild.name}' in #{target_channel.name}")
+        except Exception as e:
+            print(f"Failed to send to '{guild.name}' in #{target_channel.name}: {e}")
+            fail_count += 1
+        
+        await asyncio.sleep(1) # Small delay to avoid rate limits
+
+    await ctx.send(f"**Global Announcement Complete!**\n✅ Sent successfully to **{success_count}** servers.\n❌ Failed in **{fail_count}** servers.")
+
+
+# --- Helper function for leaderboard ---
 async def show_leaderboard(channel, guild_id):
     state = game_states.get(guild_id)
     if not state or not state.player_stats: return
-    # Sort the new player_stats structure
     sorted_scores = sorted(state.player_stats.items(), key=lambda item: item[1]['score'], reverse=True)
     embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
     description = ""
     for i, (user_id, data) in enumerate(sorted_scores[:10]):
         try: user = await bot.fetch_user(user_id); user_name = user.display_name
         except discord.NotFound: user_name = f"User (ID: {user_id})"
-        emoji = ""
-        if i == 0: emoji = "🥇 "
-        elif i == 1: emoji = "🥈 "
-        elif i == 2: emoji = "🥉 "
+        emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else ""
         description += f"{emoji}**{user_name}**: {data['score']} points\n"
     embed.description = description
     await channel.send(embed=embed)
 
-# --- Error Handling (INTACT) ---
+# --- Error Handling ---
 @gban.error
 @gunban.error
+@global_announce.error # Added error handler for the new command
 async def admin_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument): await ctx.send(f"Missing argument.")
     elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)): await ctx.send(f"Could not find user.")
     elif isinstance(error, commands.BadArgument): await ctx.send("Invalid user ID.")
+    elif isinstance(error, commands.NotOwner): await ctx.send("`[ACCESS DENIED]` This command is for the bot owner only.")
     else: await ctx.send("An unexpected error occurred."); print(f"Error: {error}")
 
 @flag_start.error
