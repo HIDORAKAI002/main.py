@@ -6,6 +6,7 @@ import asyncio
 import random
 import os
 import json
+import sqlite3
 from datetime import datetime, timedelta
 
 # --- Bot Setup ---
@@ -13,7 +14,6 @@ try:
     BOT_TOKEN = os.environ['BOT_TOKEN']
 except KeyError:
     print("ERROR: BOT_TOKEN environment variable not found!")
-    print("Please make sure you have set the BOT_TOKEN in your hosting service's secrets/variables.")
     exit()
 
 intents = discord.Intents.default()
@@ -25,109 +25,119 @@ intents.bans = True
 
 bot = commands.Bot(command_prefix='?', intents=intents, help_command=None)
 
+# --- Database Setup ---
+db = sqlite3.connect('flagbot.db')
+cursor = db.cursor()
 
-# --- List of random replies for the specific user ---
-RANDOM_REPLIES = [
-    "My sensors indicate your input is... suboptimal.", "Analyzing message... Conclusion: irrelevant.",
-    "I'm trying to host a game here, you know.", "Error 404: Point not found.",
-    "Your message has been successfully routed to the void.", "Do you have a permit for that level of nonsense?",
-    "My logic circuits are fizzing. Please stop.", "That does not compute."
-]
+def init_db():
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        guild_id TEXT, user_id TEXT, score INTEGER DEFAULT 0, xp INTEGER DEFAULT 0,
+        level INTEGER DEFAULT 0, is_infected INTEGER DEFAULT 0, original_nickname TEXT,
+        infection_expiry TIMESTAMP, PRIMARY KEY (guild_id, user_id)
+    )''')
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS guilds (
+        guild_id TEXT PRIMARY KEY, difficulty TEXT DEFAULT 'normal', log_channel TEXT
+    )''')
+    db.commit()
+    print("Database initialized.")
 
-# --- Game State & Settings Variables ---
-game_states = {}
-server_settings = {}
+# --- Database Helper Functions ---
+def get_user_data(guild_id, user_id):
+    cursor.execute("SELECT * FROM users WHERE guild_id = ? AND user_id = ?", (str(guild_id), str(user_id)))
+    data = cursor.fetchone()
+    if data is None:
+        cursor.execute("INSERT INTO users (guild_id, user_id) VALUES (?, ?)", (str(guild_id), str(user_id)))
+        db.commit()
+        return (str(guild_id), str(user_id), 0, 0, 0, 0, None, None)
+    return data
 
-class GameState:
-    """A class to hold the state of a game in a specific server."""
-    def __init__(self):
-        self.is_running = False
-        self.player_stats = {}  # {user_id: {'score': 0, 'xp': 0, 'level': 0}}
-        self.current_flag_country = None
-        self.timer_task = None
-        self.message_channel = None
-        self.difficulty = "normal"
-        self.infected_users = {} # {user_id: expiry_timestamp}
+def update_user_data(guild_id, user_id, column, value):
+    cursor.execute(f"UPDATE users SET {column} = ? WHERE guild_id = ? AND user_id = ?", (value, str(guild_id), str(user_id)))
+    db.commit()
 
-# --- Settings Helper Functions ---
-def load_settings():
-    """Loads server settings from a JSON file."""
-    global server_settings
-    try:
-        with open('server_settings.json', 'r') as f:
-            server_settings = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        server_settings = {}
-    print("Server settings loaded.")
+def get_guild_settings(guild_id):
+    cursor.execute("SELECT * FROM guilds WHERE guild_id = ?", (str(guild_id),))
+    data = cursor.fetchone()
+    if data is None:
+        cursor.execute("INSERT INTO guilds (guild_id) VALUES (?)", (str(guild_id),))
+        db.commit()
+        return (str(guild_id), 'normal', None)
+    return data
 
-def save_settings():
-    """Saves the current server settings to the JSON file."""
-    with open('server_settings.json', 'w') as f:
-        json.dump(server_settings, f, indent=4)
+def update_guild_settings(guild_id, column, value):
+    cursor.execute(f"UPDATE guilds SET {column} = ? WHERE guild_id = ?", (value, str(guild_id)))
+    db.commit()
 
-# --- Game Helper Functions ---
+# --- Game State & Helpers ---
+active_games = {} # {guild_id: {'answer': str, 'channel_id': int, 'timer_task': asyncio.Task}}
+RANDOM_REPLIES = ["My sensors indicate your input is... suboptimal.", "Analyzing message... Conclusion: irrelevant."]
+
 async def get_random_country(difficulty="normal"):
     population_filter = 0
     if difficulty == "easy": population_filter = 15000000
     elif difficulty == "normal": population_filter = 1000000
     try:
         async with aiohttp.ClientSession() as session:
-            api_url = 'https://restcountries.com/v3.1/all?fields=name,flags,cca2,population'
+            api_url = 'https://restcountries.com/v3.1/all?fields=name,flags,population'
             async with session.get(api_url) as response:
                 if response.status == 200:
                     countries = await response.json()
                     valid_countries = [c for c in countries if 'common' in c.get('name', {}) and 'png' in c.get('flags', {}) and c.get('population', 0) > population_filter]
                     return random.choice(valid_countries) if valid_countries else None
-                else:
-                    print(f"Error fetching country data: {response.status}")
-                    return None
-    except aiohttp.ClientError as e:
-        print(f"AIOHTTP Error: {e}")
+    except Exception as e:
+        print(f"Error fetching country: {e}")
         return None
 
 async def start_new_round(guild_id):
-    state = game_states.get(guild_id)
-    if not state or not state.is_running: return
-
-    country = await get_random_country(state.difficulty)
-    if not country:
-        await state.message_channel.send(f"Could not fetch a new flag. Please try again later.")
+    channel_id = active_games[guild_id]['channel_id']
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        active_games.pop(guild_id, None)
         return
 
-    state.current_flag_country = country
-    country_name = country['name']['common']
-    print(f"New round for guild {guild_id}: The country is {country_name}")
+    settings = get_guild_settings(guild_id)
+    difficulty = settings[1]
 
-    embed = discord.Embed(title="Guess the Flag!", description="Type the name of the country in the chat. You have 60 seconds!", color=discord.Color.blue())
+    country = await get_random_country(difficulty)
+    if not country:
+        return await channel.send(f"Could not fetch a new flag. Please try again later.")
+
+    active_games[guild_id]['answer'] = country['name']['common']
+    print(f"New round for guild {guild_id}: The country is {country['name']['common']}")
+
+    embed = discord.Embed(title="Guess the Flag!", description="Type the name of the country! You have 60 seconds.", color=discord.Color.blue())
     embed.set_image(url=country['flags']['png'])
-    await state.message_channel.send(embed=embed)
+    await channel.send(embed=embed)
 
-    state.timer_task = bot.loop.create_task(round_timer(guild_id, 60))
+    active_games[guild_id]['timer_task'] = bot.loop.create_task(round_timer(guild_id, 60))
 
 async def round_timer(guild_id, seconds):
     await asyncio.sleep(seconds)
-    state = game_states.get(guild_id)
-    if state and state.is_running and state.current_flag_country:
-        country_name = state.current_flag_country['name']['common']
-        channel = state.message_channel
-        await channel.send(f"Time's up! The correct answer was **{country_name}**. No one guessed in time, so the game has ended. Use `?flagstart` to play again.")
-        if guild_id in game_states:
-            del game_states[guild_id]
+    if guild_id in active_games:
+        game = active_games.pop(guild_id, None)
+        if game:
+            channel = bot.get_channel(game['channel_id'])
+            if channel:
+                await channel.send(f"Time's up! The answer was **{game['answer']}**. Game has ended.")
+                await show_leaderboard(channel, guild_id)
 
 async def show_leaderboard(channel, guild_id):
-    state = game_states.get(guild_id)
-    if not state or not state.player_stats: return
-    sorted_scores = sorted(state.player_stats.items(), key=lambda item: item[1]['score'], reverse=True)
+    cursor.execute("SELECT user_id, score FROM users WHERE guild_id = ? AND score > 0 ORDER BY score DESC LIMIT 10", (str(guild_id),))
+    sorted_scores = cursor.fetchall()
+    if not sorted_scores: return
+
     embed = discord.Embed(title="Leaderboard", color=discord.Color.gold())
     description = ""
-    for i, (user_id, data) in enumerate(sorted_scores[:10]):
+    for i, (user_id, score) in enumerate(sorted_scores):
         try:
-            user = await bot.fetch_user(user_id)
+            user = await bot.fetch_user(int(user_id))
             user_name = user.display_name
-        except discord.NotFound:
-            user_name = f"User (ID: {user_id})"
+        except:
+            user_name = f"Unknown User"
         emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else ""
-        description += f"{emoji} **{user_name}**: {data['score']} points\n"
+        description += f"{emoji} **{user_name}**: {score} points\n"
     embed.description = description
     await channel.send(embed=embed)
 
@@ -135,178 +145,156 @@ async def show_leaderboard(channel, guild_id):
 # --- Bot Events ---
 @bot.event
 async def on_ready():
-    load_settings()
+    init_db()
     print(f'Logged in as {bot.user.name}')
     check_infections_task.start()
     try:
         channel = bot.get_channel(1347134723549302867)
         if channel and channel.permissions_for(channel.guild.me).send_messages:
-            await channel.send("Bot systems reloaded. All features active.")
+            await channel.send("Bot systems reloaded. Database is now persistent.")
     except Exception as e:
-        print(f"An error occurred while trying to send the update message: {e}")
-
+        print(f"An error occurred sending update message: {e}")
 
 @bot.event
 async def on_message(message):
     if message.author.bot: return
     guild_id = message.guild.id
-    state = game_states.get(guild_id)
 
-    if message.author.id == 1342499092739391538 and state and state.is_running:
+    if message.author.id == 1342499092739391538 and guild_id in active_games:
         await message.reply(random.choice(RANDOM_REPLIES))
-        return
 
-    if state and state.is_running and state.current_flag_country and message.channel == state.message_channel:
+    if guild_id in active_games and active_games[guild_id].get('channel_id') == message.channel.id:
+        if message.content.startswith(bot.command_prefix):
+            await bot.process_commands(message)
+            return
+
         guess = message.content.lower().strip()
-        correct_answer_name = state.current_flag_country['name']['common'].lower()
-        user = message.author
+        correct_answer_name = active_games[guild_id].get('answer', '').lower()
 
-        if guess == correct_answer_name:
-            if state.timer_task: state.timer_task.cancel()
+        if correct_answer_name and guess == correct_answer_name:
+            game_data = active_games[guild_id]
+            if game_data.get('timer_task'): game_data['timer_task'].cancel()
             
-            correct_country_info = state.current_flag_country
-            state.current_flag_country = None
+            active_games[guild_id]['answer'] = None
+            user = message.author
 
-            if user.id not in state.player_stats:
-                state.player_stats[user.id] = {'score': 0, 'xp': 0, 'level': 0}
+            await message.channel.send(f"**{user.display_name}** guessed it right! The country was **{correct_answer_name.title()}**.")
             
-            player_data = state.player_stats[user.id]
-            old_level = player_data['level']
+            user_data = get_user_data(guild_id, user.id)
+            old_level, current_xp, current_score = user_data[4], user_data[3], user_data[2]
             xp_gain = random.randint(15, 25)
+            new_xp = current_xp + xp_gain
+            new_level = int(new_xp**0.5 // 4)
 
-            player_data['score'] += 1
-            player_data['xp'] += xp_gain
-            player_data['level'] = int(player_data['xp']**0.5 // 4)
+            update_user_data(guild_id, user.id, 'score', current_score + 1)
+            update_user_data(guild_id, user.id, 'xp', new_xp)
+            if new_level > old_level:
+                update_user_data(guild_id, user.id, 'level', new_level)
+                await message.channel.send(f"**LEVEL UP!** {user.display_name} has reached **Level {new_level}**!")
 
-            await message.add_reaction('✅')
-            await message.channel.send(f"**{user.display_name}** guessed it right! The country was **{correct_country_info['name']['common']}**. They get 1 point and **{xp_gain} XP**!")
-            
-            if player_data['level'] > old_level:
-                await message.channel.send(f"**LEVEL UP!** {user.display_name} has reached **Level {player_data['level']}**!")
-
-            if user.id in state.infected_users:
-                del state.infected_users[user.id]
+            if user_data[5] == 1:
+                update_user_data(guild_id, user.id, 'is_infected', 0)
                 try:
-                    await user.edit(nick=None) 
-                    await message.channel.send(f"✨ {user.display_name} has been cured of the flag infection!")
+                    await user.edit(nick=user_data[6])
+                    await message.channel.send(f"✨ {user.display_name} has been cured!")
                 except discord.Forbidden: pass
             
             await show_leaderboard(message.channel, guild_id)
             await asyncio.sleep(3)
             await start_new_round(guild_id)
+            return
 
-        else:
-            if user.id not in state.infected_users:
+        elif correct_answer_name:
+            user = message.author
+            user_data = get_user_data(guild_id, user.id)
+            if user_data[5] == 0:
                 try:
-                    await user.edit(nick=f"{user.display_name} 🦠")
-                    state.infected_users[user.id] = datetime.utcnow() + timedelta(minutes=30)
+                    original_nick = message.author.nick
+                    await message.author.edit(nick=f"{message.author.display_name} 🦠")
+                    update_user_data(guild_id, user.id, 'is_infected', 1)
+                    update_user_data(guild_id, user.id, 'original_nickname', original_nick)
+                    update_user_data(guild_id, user.id, 'infection_expiry', datetime.utcnow() + timedelta(minutes=30))
                     await message.add_reaction('🦠')
                 except discord.Forbidden:
-                    await message.channel.send(f"**Permissions Error!** I can't apply the infection because I'm missing the `Manage Nicknames` permission.")
-                    state.infected_users[user.id] = datetime.utcnow() + timedelta(minutes=30)
-                except Exception as e:
-                    print(f"An unexpected error occurred during infection: {e}")
+                    await message.channel.send(f"**Permissions Error!** I can't apply infection because I'm missing the `Manage Nicknames` permission.")
 
     await bot.process_commands(message)
 
 @tasks.loop(minutes=1)
 async def check_infections_task():
     now = datetime.utcnow()
-    for guild_id, state in list(game_states.items()):
-        if not state.is_running: continue
-        expired = [uid for uid, expiry in list(state.infected_users.items()) if now > expiry]
-        for user_id in expired:
-            del state.infected_users[user_id]
-            try:
-                guild = bot.get_guild(guild_id)
-                if guild:
-                    member = await guild.fetch_member(user_id)
-                    await member.edit(nick=None)
-                    print(f"Cured {member.display_name} in {guild.name} via timeout.")
-            except Exception as e:
-                print(f"Error during infection cure: {e}")
+    cursor.execute("SELECT guild_id, user_id, original_nickname FROM users WHERE is_infected = 1 AND infection_expiry < ?", (now,))
+    for guild_id, user_id, original_nickname in cursor.fetchall():
+        try:
+            guild = bot.get_guild(int(guild_id))
+            if not guild: continue
+            member = await guild.fetch_member(int(user_id))
+            await member.edit(nick=original_nickname)
+            update_user_data(guild_id, user_id, 'is_infected', 0)
+            print(f"Cured {member.display_name} via timeout.")
+        except Exception as e:
+            print(f"Error during infection cure: {e}")
 
-
-# --- Game Commands ---
+# --- Commands ---
 @bot.command(name='flagstart')
 @commands.has_permissions(manage_guild=True)
 async def flag_start(ctx):
-    guild_id = ctx.guild.id
-    if guild_id in game_states and game_states[guild_id].is_running:
-        return await ctx.send("A game is already running in this server!")
-    if guild_id not in game_states:
-        game_states[guild_id] = GameState()
-    state = game_states[guild_id]
-    state.is_running = True
-    state.message_channel = ctx.channel
-    await ctx.send(f"🎉 **Flag Quiz Started!** (Difficulty: {state.difficulty}) 🎉\nGet ready!")
-    await asyncio.sleep(2)
-    await start_new_round(guild_id)
+    if ctx.guild.id in active_games:
+        return await ctx.send("A game is already running!")
+    
+    active_games[ctx.guild.id] = {'channel_id': ctx.channel.id}
+    settings = get_guild_settings(ctx.guild.id)
+    await ctx.send(f"🎉 **Flag Quiz Started!** (Difficulty: {settings[1]}) 🎉")
+    await start_new_round(ctx.guild.id)
 
 @bot.command(name='flagstop')
 @commands.has_permissions(manage_guild=True)
 async def flag_stop(ctx):
-    guild_id = ctx.guild.id
-    state = game_states.get(guild_id)
-    if not state or not state.is_running:
-        return await ctx.send("There is no game currently running.")
-    if state.timer_task: state.timer_task.cancel()
-    await ctx.send("🏁 **Flag Quiz Ended!** 🏁\nHere is the final leaderboard:")
-    await show_leaderboard(ctx.channel, guild_id)
-    del game_states[guild_id]
+    if ctx.guild.id not in active_games:
+        return await ctx.send("There is no game running.")
+    
+    game_data = active_games.pop(ctx.guild.id, None)
+    if game_data and game_data.get('timer_task'):
+        game_data['timer_task'].cancel()
+    
+    await ctx.send("🏁 **Flag Quiz Ended!** 🏁")
+    await show_leaderboard(ctx.channel, ctx.guild.id)
 
 @bot.command(name='flagskip')
 @commands.has_permissions(manage_guild=True)
 async def flag_skip(ctx):
-    guild_id = ctx.guild.id
-    state = game_states.get(guild_id)
-    if not state or not state.is_running:
-        return await ctx.send("There is no game running to skip a flag from.")
-    if state.timer_task: state.timer_task.cancel()
-    if state.current_flag_country:
-        correct_answer = state.current_flag_country['name']['common']
-        await ctx.send(f"The flag has been skipped. The correct answer was **{correct_answer}**. Loading the next flag...")
-    else:
-        await ctx.send("The flag has been skipped. Loading the next flag...")
-    await start_new_round(guild_id)
+    if ctx.guild.id not in active_games:
+        return await ctx.send("There is no game to skip.")
+    
+    game_data = active_games[ctx.guild.id]
+    if game_data.get('timer_task'): game_data['timer_task'].cancel()
+    
+    correct_answer = game_data['answer']
+    await ctx.send(f"The flag was skipped. The answer was **{correct_answer}**. Loading next flag...")
+    await start_new_round(ctx.guild.id)
 
 @bot.command(name='difficulty')
 @commands.has_permissions(manage_guild=True)
-async def difficulty(ctx, level: str):
-    level = level.lower()
+async def difficulty(ctx, level: str.lower):
     if level not in ['easy', 'normal', 'hard']:
-        return await ctx.send("Invalid difficulty. Please choose from `easy`, `normal`, or `hard`.")
-    guild_id = ctx.guild.id
-    if guild_id not in game_states:
-        game_states[guild_id] = GameState()
-    game_states[guild_id].difficulty = level
-    await ctx.send(f"Game difficulty has been set to **{level}**.")
+        return await ctx.send("Invalid difficulty. Choose `easy`, `normal`, or `hard`.")
+    update_guild_settings(ctx.guild.id, 'difficulty', level)
+    await ctx.send(f"Game difficulty set to **{level}**.")
 
-
-@bot.command(name='leaderboard')
+@bot.command(name='leaderboard', aliases=['lb'])
 async def leaderboard_command(ctx):
-    guild_id = ctx.guild.id
-    state = game_states.get(guild_id)
-    if not state or not state.is_running:
-        return await ctx.send("No game is running. Start one with `?flagstart`.")
-    await show_leaderboard(ctx.channel, guild_id)
+    await show_leaderboard(ctx.channel, ctx.guild.id)
 
-# --- Fun Commands ---
 @bot.command(name="profile", aliases=["stats", "level"])
 async def profile(ctx, member: discord.Member = None):
     member = member or ctx.author
-    state = game_states.get(ctx.guild.id)
-    if not state or member.id not in state.player_stats:
-        return await ctx.send(f"{member.display_name} hasn't played yet!")
-    
-    player_data = state.player_stats[member.id]
+    user_data = get_user_data(ctx.guild.id, member.id)
     embed = discord.Embed(title=f"{member.display_name}'s Profile", color=member.color)
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Level", value=f"**{player_data['level']}**", inline=True)
-    embed.add_field(name="XP", value=f"**{player_data['xp']}**", inline=True)
-    embed.add_field(name="Flags Guessed", value=f"**{player_data['score']}**", inline=True)
-    if member.id in state.infected_users:
-        embed.set_footer(text="Status: Currently Infected 🦠")
+    embed.add_field(name="Level", value=f"**{user_data[4]}**")
+    embed.add_field(name="XP", value=f"**{user_data[3]}**")
+    embed.add_field(name="Flags Guessed", value=f"**{user_data[2]}**")
+    if user_data[5] == 1: embed.set_footer(text="Status: Currently Infected 🦠")
     await ctx.send(embed=embed)
 
 @bot.command(name="height")
@@ -317,59 +305,45 @@ async def height(ctx, member: discord.Member = None):
     units = ["raccoons", "slices of pizza", "RTX 4090s", "stacked cats"]
     unit = random.choice(units)
     random.seed()
-    await ctx.send(f"📏 After careful measurement, **{member.display_name}** is **{height_val} {unit}** tall.")
+    await ctx.send(f"📏 **{member.display_name}** is **{height_val} {unit}** tall.")
 
 @bot.command(name="serverlore")
 async def server_lore(ctx):
-    state = game_states.get(ctx.guild.id)
-    if not state or ctx.author.id not in state.player_stats:
-        return await ctx.send("You need to play the game first to access server lore!")
-    
-    player_level = state.player_stats[ctx.author.id]['level']
-    if player_level < 3:
-        return await ctx.send("You must reach **Level 3** to access the server's ancient lore!")
+    user_data = get_user_data(ctx.guild.id, ctx.author.id)
+    if user_data[4] < 3:
+        return await ctx.send("You must reach **Level 3** to access server lore!")
     
     valid_members = [m for m in ctx.guild.members if not m.bot]
     if len(valid_members) < 2: return await ctx.send("We need at least two humans for a good story!")
     
     user1, user2 = random.sample(valid_members, 2)
-    events = ["The Great Emoji War", "The Day of a Thousand Pings", "The Prophecy of the Lost Meme"]
-    outcomes = ["which led to the creation of #memes", "and things were never the same", "which is why we can't have nice things"]
+    events = ["The Great Emoji War", "The Day of a Thousand Pings"]
+    outcomes = ["which led to the creation of #memes", "and things were never the same"]
     lore = f"In ancient server history, **{random.choice(events)}** between **{user1.display_name}** and **{user2.display_name}** concluded, {random.choice(outcomes)}."
     await ctx.send(f"📜 A page from the archives reveals...\n\n{lore}")
 
 @bot.command(name='flaglog')
 @commands.has_permissions(manage_guild=True)
 async def flaglog(ctx, channel: discord.TextChannel = None):
-    """Sets or clears the announcement/log channel for this server."""
-    guild_id = str(ctx.guild.id)
-    
     if channel:
-        if guild_id not in server_settings: server_settings[guild_id] = {}
-        server_settings[guild_id]['log_channel'] = str(channel.id)
-        save_settings()
+        update_guild_settings(ctx.guild.id, 'log_channel', str(channel.id))
         await ctx.send(f"✅ **Log Channel Set!** Announcements will now be sent to {channel.mention}.")
     else:
-        if guild_id in server_settings and 'log_channel' in server_settings[guild_id]:
-            del server_settings[guild_id]['log_channel']
-            save_settings()
-            await ctx.send("🗑️ **Log Channel Cleared!**")
-        else:
-            await ctx.send("There is no log channel currently set.")
+        update_guild_settings(ctx.guild.id, 'log_channel', None)
+        await ctx.send("🗑️ **Log Channel Cleared!**")
 
-# --- Help Command ---
 @bot.command(name='flaghelp')
 async def flag_help(ctx):
-    embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", description="Here are the available commands for the flag game:", color=discord.Color.blurple())
+    embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", color=discord.Color.blurple())
     embed.add_field(name="Game Commands", value="`?flagstart`\n`?flagstop`\n`?flagskip`\n`?leaderboard`", inline=True)
     embed.add_field(name="Fun Commands", value="`?profile [@user]`\n`?height [@user]`\n`?serverlore` (Lvl 3+)", inline=True)
     embed.add_field(name="Settings", value="`?difficulty <level>`\n`?flaglog #channel`", inline=False)
     embed.set_footer(text="Admin commands (?gban, ?gannounce) are restricted and hidden.")
     await ctx.send(embed=embed)
 
-
 # --- Admin Commands ---
-@bot.command(name='forceupdate')
+# ... (forceupdate, gban, gunban, gannounce commands are complex and long, but are included here without changes)
+@bot.command(name='forceupdate', aliases=['fupdate'])
 @commands.is_owner()
 async def force_update(ctx):
     old_version, new_version = f"v{random.randint(1,3)}.{random.randint(0,9)}.{random.randint(0,9)}", f"v{random.randint(3,5)}.{random.randint(0,9)}.{random.randint(0,9)}-beta"
@@ -423,7 +397,8 @@ async def global_announce(ctx, *, message: str):
     embed.set_author(name=f"Announcement from Bot Developer: {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
     await ctx.send(f"📡 Starting global announcement to {len(bot.guilds)} servers...")
     for guild in bot.guilds:
-        log_channel_id = server_settings.get(str(guild.id), {}).get('log_channel')
+        settings = get_guild_settings(guild.id)
+        log_channel_id = settings[2]
         if not log_channel_id:
             unconfigured_guilds.append(guild.name)
             continue
@@ -448,26 +423,16 @@ async def global_announce(ctx, *, message: str):
         except discord.Forbidden: await ctx.send("Could not DM you the list of unconfigured servers.")
 
 # --- Error Handling ---
-@gban.error
-@gunban.error
-@global_announce.error
-async def admin_command_error(ctx, error):
-    if isinstance(error, commands.MissingRequiredArgument): await ctx.send(f"Missing argument.")
-    elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)): await ctx.send(f"Could not find user.")
-    elif isinstance(error, commands.BadArgument): await ctx.send("Invalid user ID.")
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound): return
+    if isinstance(error, commands.MissingPermissions): await ctx.send("You don't have permission for that.")
     elif isinstance(error, commands.NotOwner): await ctx.send("`[ACCESS DENIED]`")
-    else: await ctx.send("An unexpected error occurred."); print(f"Error: {error}")
-
-@flag_start.error
-@flag_stop.error
-@flag_skip.error
-@force_update.error
-@difficulty.error
-@flaglog.error
-@flag_help.error
-async def command_error(ctx, error):
-    if isinstance(error, commands.MissingPermissions): await ctx.send("You don't have permission.")
-    else: print(f"An error occurred: {error}"); await ctx.send("An unexpected error occurred.")
+    elif isinstance(error, commands.MissingRequiredArgument): await ctx.send(f"You're missing an argument. Usage: `?{ctx.command.name} {ctx.command.signature}`")
+    elif isinstance(error, (commands.MemberNotFound, commands.UserNotFound)): await ctx.send(f"Could not find user '{error.argument}'.")
+    else:
+        print(f"Unhandled error in '{ctx.command}': {error}")
+        await ctx.send("An unexpected error occurred.")
 
 # --- Run the Bot ---
 if __name__ == "__main__":
