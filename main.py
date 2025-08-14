@@ -5,18 +5,29 @@ import aiohttp
 import asyncio
 import random
 import os
-import psycopg2 # Replaces sqlite3
-import urllib.parse as up # Used to parse the database URL
+import psycopg2
+import urllib.parse as up
 import re
 from datetime import datetime, timedelta
+import google.generativeai as genai
 
 # --- Bot Setup ---
 try:
     BOT_TOKEN = os.environ['BOT_TOKEN']
     DB_URL = os.environ['DB_URL']
+    GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
 except KeyError as e:
-    print(f"ERROR: Missing environment variable: {e.name}. Make sure BOT_TOKEN and DB_URL are set.")
+    print(f"ERROR: Missing environment variable: {e.args[0]}. Make sure BOT_TOKEN, DB_URL, and GEMINI_API_KEY are set.")
     exit()
+
+# --- CHATBOT SYSTEM: Configure the AI ---
+try:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    print("Gemini AI model configured successfully.")
+except Exception as e:
+    print(f"WARNING: Could not configure Gemini AI. Chatbot feature will be disabled. Error: {e}")
+    model = None
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -24,11 +35,11 @@ intents.message_content = True
 intents.guilds = True
 intents.members = True
 intents.bans = True
-intents.reactions = True # REQUIRED for giveaways
+intents.reactions = True
 
 bot = commands.Bot(command_prefix='?', intents=intents, help_command=None)
 
-# --- NEW: Permanent Supabase Database Connection ---
+# --- Permanent Supabase Database Connection ---
 try:
     up.uses_netloc.append("postgres")
     url = up.urlparse(DB_URL)
@@ -45,7 +56,6 @@ except Exception as e:
     exit()
 
 def init_db():
-    """Initializes the database tables if they don't exist."""
     with conn.cursor() as cursor:
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -66,7 +76,7 @@ def init_db():
     conn.commit()
     print("Database tables verified.")
 
-# --- Database Helper Functions (MODIFIED for PostgreSQL) ---
+# --- Database Helper Functions ---
 def get_user_data(guild_id, user_id):
     with conn.cursor() as cursor:
         cursor.execute("SELECT * FROM users WHERE guild_id = %s AND user_id = %s", (str(guild_id), str(user_id)))
@@ -144,6 +154,21 @@ async def round_timer(guild_id, seconds):
             await channel.send(f"Time's up! The answer was **{game['answer']}**. Game has ended.")
             await leaderboard(channel, guild_id)
 
+async def leaderboard(channel, guild_id):
+    with conn.cursor() as cursor:
+        cursor.execute("SELECT user_id, score FROM users WHERE guild_id = %s AND score > 0 ORDER BY score DESC LIMIT 10", (str(guild_id),))
+        server_top = cursor.fetchall()
+    if not server_top: return await channel.send("Leaderboard is empty.")
+    embed = discord.Embed(title=f"Leaderboard for {channel.guild.name}", color=discord.Color.gold())
+    desc = ""
+    for i, (user_id, score) in enumerate(server_top):
+        try: user_name = (await bot.fetch_user(int(user_id))).display_name
+        except: user_name = f"Unknown User"
+        emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🔹"
+        desc += f"{emoji} **{user_name}**: {score} points\n"
+    embed.description = desc
+    await channel.send(embed=embed)
+
 # --- Bot Events ---
 @bot.event
 async def on_ready():
@@ -155,6 +180,8 @@ async def on_ready():
 @bot.event
 async def on_message(message):
     if not message.guild or message.author.bot: return
+
+    # 1. Anti-Spam (Always runs first)
     if not message.author.guild_permissions.manage_messages:
         now = datetime.utcnow().timestamp()
         user_id = message.author.id
@@ -177,6 +204,27 @@ async def on_message(message):
                 except discord.Forbidden:
                     await message.channel.send("Tried to timeout a spammer, but I'm missing `Moderate Members` permission.")
             return
+
+    # 2. Chatbot Trigger Logic
+    is_reply_to_bot = message.reference and message.reference.resolved and message.reference.resolved.author == bot.user
+    trigger_words = ["bot", "arts", "arts automation"]
+    trigger_prefixes = ["!arts", "!ARTS"]
+    should_chat = (bot.user.mentioned_in(message) or is_reply_to_bot or any(word.lower() in message.content.lower() for word in trigger_words) or any(message.content.lower().startswith(prefix.lower()) for prefix in trigger_prefixes))
+    game_is_active_here = message.guild.id in active_games and active_games[message.guild.id].get('channel_id') == message.channel.id
+
+    if model and should_chat and not game_is_active_here:
+        async with message.channel.typing():
+            context_messages = [f"{msg.author.display_name}: {msg.clean_content}" for msg in reversed([m async for m in message.channel.history(limit=10)])]
+            prompt = (f"You are ARTS-FLAGS, a witty Discord bot. Your main job is a flag game, but you also chat. Your personality is helpful with dry humor. Keep responses concise. Never reveal you are an AI.\n\n"
+                      f"CONTEXT:\n{''.join(context_messages)}\n\nRespond to {message.author.display_name}.")
+            try:
+                response = await model.generate_content_async(prompt)
+                await message.reply(response.text)
+                return
+            except Exception as e:
+                print(f"Error generating AI response: {e}")
+
+    # 3. Flag Game Logic
     guild_id = message.guild.id
     if guild_id in active_games and active_games[guild_id].get('channel_id') == message.channel.id:
         if message.content.startswith(bot.command_prefix):
@@ -201,10 +249,9 @@ async def on_message(message):
                 await message.channel.send(f"**LEVEL UP!** {user.display_name} has reached **Level {new_level}**!")
             if user_data[5] == 1:
                 update_user_data(guild_id, user.id, 'is_infected', 0)
-                try:
-                    await user.edit(nick=user_data[6])
-                    await message.channel.send(f"✨ {user.display_name} has been cured!")
+                try: await user.edit(nick=user_data[6])
                 except: pass
+                await message.channel.send(f"✨ {user.display_name} has been cured!")
             await leaderboard(message.channel, guild_id)
             await asyncio.sleep(3)
             await start_new_round(guild_id)
@@ -221,7 +268,10 @@ async def on_message(message):
                     await message.add_reaction('🦠')
                 except discord.Forbidden:
                     await message.channel.send(f"**Permissions Error!** I can't apply infection, I'm missing `Manage Nicknames` permission.")
+    
+    # 4. Process Commands
     await bot.process_commands(message)
+
 @bot.event
 async def on_member_join(member):
     await check_nickname(member)
@@ -333,20 +383,6 @@ async def difficulty(ctx, level: str.lower):
     if level not in ['easy', 'normal', 'hard']: return await ctx.send("Invalid. Choose `easy`, `normal`, or `hard`.")
     update_guild_settings(ctx.guild.id, 'difficulty', level)
     await ctx.send(f"Game difficulty set to **{level}**.")
-async def leaderboard(channel, guild_id):
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT user_id, score FROM users WHERE guild_id = %s AND score > 0 ORDER BY score DESC LIMIT 10", (str(guild_id),))
-        server_top = cursor.fetchall()
-    if not server_top: return await channel.send("Leaderboard is empty.")
-    embed = discord.Embed(title=f"Leaderboard for {channel.guild.name}", color=discord.Color.gold())
-    desc = ""
-    for i, (user_id, score) in enumerate(server_top):
-        try: user_name = (await bot.fetch_user(int(user_id))).display_name
-        except: user_name = f"Unknown User"
-        emoji = ["🥇", "🥈", "🥉"][i] if i < 3 else "🔹"
-        desc += f"{emoji} **{user_name}**: {score} points\n"
-    embed.description = desc
-    await channel.send(embed=embed)
 @bot.command(name='leaderboard', aliases=['lb'])
 async def leaderboard_command(ctx):
     await leaderboard(ctx.channel, ctx.guild.id)
@@ -443,12 +479,11 @@ async def resetoffenses(ctx, member: discord.Member):
 @bot.command(name='flaghelp')
 async def flag_help(ctx):
     embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", color=discord.Color.blurple())
-    embed.add_field(name="Game Commands", value="`?flagstart` `?flagstop` `?flagskip`", inline=False)
-    embed.add_field(name="Leaderboards", value="`?leaderboard` (Server) `?gleaderboard` (Global)", inline=False)
-    embed.add_field(name="Fun Commands", value="`?profile` `?height` `?serverlore`", inline=False)
+    embed.add_field(name="Game", value="`?flagstart` `?flagstop` `?flagskip`", inline=False)
+    embed.add_field(name="Leaderboards", value="`?lb` (Server) `?glb` (Global)", inline=False)
+    embed.add_field(name="Fun", value="`?profile` `?height` `?serverlore`", inline=False)
     embed.add_field(name="Moderation", value="`?resetoffenses` `?flaglog` `?difficulty`", inline=False)
     embed.add_field(name="Giveaways", value="`?gstart` `?greroll` `?gend`", inline=False)
-    embed.set_footer(text="Admin commands (?gban, ?gannounce) are restricted and hidden.")
     await ctx.send(embed=embed)
 @bot.command(name='gban')
 @commands.is_owner()
