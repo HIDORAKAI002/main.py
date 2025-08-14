@@ -1,4 +1,5 @@
-discord.py
+iscord.py
 aiohttp
 psycopg2-binary
 python-dotenv
+google-generativeai
