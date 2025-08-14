@@ -9,25 +9,30 @@ import psycopg2
 import urllib.parse as up
 import re
 from datetime import datetime, timedelta
-import google.generativeai as genai
+from groq import Groq # NEW: For the Groq AI
+import json
 
 # --- Bot Setup ---
 try:
     BOT_TOKEN = os.environ['BOT_TOKEN']
     DB_URL = os.environ['DB_URL']
-    GEMINI_API_KEY = os.environ['GEMINI_API_KEY']
+    GROQ_API_KEY = os.environ['GROQ_API_KEY']
+    MASTER_USER_ID = int(os.environ['MASTER_USER_ID'])
 except KeyError as e:
-    print(f"ERROR: Missing environment variable: {e.args[0]}. Make sure BOT_TOKEN, DB_URL, and GEMINI_API_KEY are set.")
+    print(f"ERROR: Missing environment variable: {e.args[0]}.")
+    exit()
+except ValueError:
+    print("ERROR: MASTER_USER_ID is not a valid number.")
     exit()
 
-# --- CHATBOT SYSTEM: Configure the AI ---
+
+# --- CHATBOT SYSTEM: Configure the Groq AI ---
 try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    print("Gemini AI model configured successfully.")
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    print("Groq AI client configured successfully.")
 except Exception as e:
-    print(f"WARNING: Could not configure Gemini AI. Chatbot feature will be disabled. Error: {e}")
-    model = None
+    print(f"WARNING: Could not configure Groq AI. Chatbot feature will be disabled. Error: {e}")
+    groq_client = None
 
 intents = discord.Intents.default()
 intents.messages = True
@@ -84,7 +89,7 @@ def get_user_data(guild_id, user_id):
         if data is None:
             cursor.execute("INSERT INTO users (guild_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING", (str(guild_id), str(user_id)))
             conn.commit()
-            return (str(guild_id), str(user_id), 0, 0, 0, 0, None, None, 0)
+            return str(guild_id), str(user_id), 0, 0, 0, 0, None, None, 0
     return data
 
 def update_user_data(guild_id, user_id, column, value):
@@ -100,7 +105,7 @@ def get_guild_settings(guild_id):
         if data is None:
             cursor.execute("INSERT INTO guilds (guild_id) VALUES (%s) ON CONFLICT DO NOTHING", (str(guild_id),))
             conn.commit()
-            return (str(guild_id), 'normal', None)
+            return str(guild_id), 'normal', None
     return data
 
 def update_guild_settings(guild_id, column, value):
@@ -115,7 +120,6 @@ SPAM_THRESHOLD = 5
 SPAM_TIMEFRAME = 2.5
 BANNED_WORDS = ["inappropriate", "badword", "example"]
 active_games = {}
-RANDOM_REPLIES = ["My sensors indicate your input is... suboptimal.", "Analyzing message... Conclusion: irrelevant."]
 
 # --- Game Helper Functions ---
 async def get_random_country(difficulty="normal"):
@@ -205,37 +209,59 @@ async def on_message(message):
                     await message.channel.send("Tried to timeout a spammer, but I'm missing `Moderate Members` permission.")
             return
 
-    # 2. Chatbot Trigger Logic
+    # 2. Chatbot & Master Command Logic
     is_reply_to_bot = message.reference and message.reference.resolved and message.reference.resolved.author == bot.user
     trigger_words = ["bot", "arts", "arts automation"]
     trigger_prefixes = ["!arts", "!ARTS"]
     should_chat = (bot.user.mentioned_in(message) or is_reply_to_bot or any(word.lower() in message.content.lower() for word in trigger_words) or any(message.content.lower().startswith(prefix.lower()) for prefix in trigger_prefixes))
     game_is_active_here = message.guild.id in active_games and active_games[message.guild.id].get('channel_id') == message.channel.id
 
-    if model and should_chat and not game_is_active_here:
+    if groq_client and should_chat and not game_is_active_here:
         async with message.channel.typing():
-            context_messages = [f"{msg.author.display_name}: {msg.clean_content}" for msg in reversed([m async for m in message.channel.history(limit=15)])]
+            context_history = [msg async for msg in message.channel.history(limit=10)]
             
-            special_instructions = ""
-            if message.author.id == 1342499092739391538:
-                special_instructions = "The user you are replying to, 'shammy(lurking)', is the server owner. Be extra witty, sarcastic, and humorous with them. Feel free to make fun of them in a friendly way."
+            if message.author.id == MASTER_USER_ID and not message.content.startswith(bot.command_prefix):
+                system_prompt = ("You are a command parser. Analyze the user's request. The only command is 'ping'. "
+                                 "A ping request must have a user mention/ID and a number. "
+                                 "If it is a valid ping command, output ONLY a JSON object like: "
+                                 "`{\"command\": \"ping\", \"user_id\": \"<user_id>\", \"amount\": <number>}`. "
+                                 "Extract the numerical ID from the mention. For any other request, output ONLY: `{\"command\": \"chat\"}`.")
+                try:
+                    chat_completion = groq_client.chat.completions.create(
+                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": message.clean_content}],
+                        model="llama3-8b-8192",
+                    )
+                    response_text = chat_completion.choices[0].message.content
+                    parsed_json = json.loads(response_text.strip('` \njson'))
+                    
+                    if parsed_json.get("command") == "ping":
+                        user_id_to_ping = int(parsed_json.get("user_id"))
+                        amount = int(parsed_json.get("amount"))
+                        target_user = await bot.fetch_user(user_id_to_ping)
+                        if target_user:
+                            await message.channel.send(f"Executing order: Pinging {target_user.mention} {amount} time{'s' if amount != 1 else ''}.")
+                            for i in range(min(amount, 10)):
+                                await message.channel.send(f"Ping {i+1} for {target_user.mention}")
+                                await asyncio.sleep(1)
+                            return
+                except Exception as e:
+                    print(f"Master command parsing failed: {e}")
 
-            prompt = (
-                "You are ARTS-FLAGS, a multipurpose Discord bot. Your personality is clever, witty, and a little bit sassy, but always helpful. You are not a generic, boring AI. You have opinions. "
-                "Your main job is to run a flag game, but you love to chat when a game isn't running. "
-                "Analyze the recent conversation to understand the context and the user's sense of humor. Generate a fresh, creative, and natural-sounding response. Do not just rephrase what was said. "
-                f"{special_instructions}\n\n"
-                "Here is the recent conversation history (from oldest to newest):\n"
-                f"{'\\n'.join(context_messages)}\n\n"
-                f"Now, give a humorous and clever response to {message.author.display_name}."
-            )
+            special_instructions = "The user you are replying to is your owner. Be extra witty and sarcastic." if message.author.id == MASTER_USER_ID else ""
+            system_prompt = (f"You are ARTS-FLAGS, a witty Discord bot. Your personality is clever and sassy. "
+                             f"Keep responses very concise (1-2 sentences). {special_instructions}")
             
+            messages_for_api = [{"role": "system", "content": system_prompt}]
+            for msg in reversed(context_history):
+                role = "assistant" if msg.author == bot.user else "user"
+                messages_for_api.append({"role": role, "content": f"{msg.author.display_name}: {msg.clean_content}"})
+
             try:
-                response = await model.generate_content_async(prompt)
-                await message.reply(response.text)
+                chat_completion = groq_client.chat.completions.create(messages=messages_for_api, model="llama3-8b-8192")
+                await message.reply(chat_completion.choices[0].message.content)
                 return
             except Exception as e:
-                print(f"Error generating AI response: {e}")
+                print(f"Error generating Groq response: {e}")
 
     # 3. Flag Game Logic
     guild_id = message.guild.id
