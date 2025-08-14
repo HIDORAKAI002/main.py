@@ -9,7 +9,7 @@ import psycopg2
 import urllib.parse as up
 import re
 from datetime import datetime, timedelta
-from groq import Groq # NEW: For the Groq AI
+from groq import Groq
 import json
 
 # --- Bot Setup ---
@@ -248,8 +248,10 @@ async def on_message(message):
                     print(f"Master command parsing failed: {e}")
 
             special_instructions = "The user you are replying to is your owner. Be extra witty and sarcastic." if message.author.id == MASTER_USER_ID else ""
-            system_prompt = (f"You are ARTS-FLAGS, a witty Discord bot. Your personality is clever and sassy. "
-                             f"Keep responses very concise (1-2 sentences). {special_instructions}")
+            system_prompt = (f"You are a witty and clever Discord bot named ARTS AUTOMATION. Your personality is sassy but helpful. "
+                             f"Keep responses very concise (1-2 witty sentences). Avoid long paragraphs. "
+                             f"**Crucially, do not start your reply with 'ARTS AUTOMATION:' or your own name. Just give the direct response.** "
+                             f"{special_instructions}")
             
             messages_for_api = [{"role": "system", "content": system_prompt}]
             for msg in reversed(context_history):
@@ -262,7 +264,7 @@ async def on_message(message):
                 return
             except Exception as e:
                 print(f"Error generating Groq response: {e}")
-
+    
     # 3. Flag Game Logic
     guild_id = message.guild.id
     if guild_id in active_games and active_games[guild_id].get('channel_id') == message.channel.id:
@@ -515,12 +517,20 @@ async def gend(ctx, message_id: str):
 async def resetoffenses(ctx, member: discord.Member):
     update_user_data(ctx.guild.id, member.id, 'spam_offenses', 0)
     await ctx.send(f"✅ Reset spam offenses for {member.mention}.")
+@bot.command(name='ping')
+async def ping(ctx, member: discord.Member, amount: int = 1):
+    """Pings a user a specified number of times."""
+    if amount > 10:
+        return await ctx.send("I can't ping more than 10 times, that's just mean.")
+    for i in range(amount):
+        await ctx.send(f"Ping {i+1} for {member.mention}")
+        await asyncio.sleep(1)
 @bot.command(name='flaghelp')
 async def flag_help(ctx):
     embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", color=discord.Color.blurple())
     embed.add_field(name="Game", value="`?flagstart` `?flagstop` `?flagskip`", inline=False)
     embed.add_field(name="Leaderboards", value="`?lb` (Server) `?glb` (Global)", inline=False)
-    embed.add_field(name="Fun", value="`?profile` `?height` `?serverlore`", inline=False)
+    embed.add_field(name="Fun", value="`?profile` `?height` `?serverlore` `?ping`", inline=False)
     embed.add_field(name="Moderation", value="`?resetoffenses` `?flaglog` `?difficulty`", inline=False)
     embed.add_field(name="Giveaways", value="`?gstart` `?greroll` `?gend`", inline=False)
     await ctx.send(embed=embed)
