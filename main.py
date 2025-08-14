@@ -214,9 +214,22 @@ async def on_message(message):
 
     if model and should_chat and not game_is_active_here:
         async with message.channel.typing():
-            context_messages = [f"{msg.author.display_name}: {msg.clean_content}" for msg in reversed([m async for m in message.channel.history(limit=10)])]
-            prompt = (f"You are ARTS-FLAGS, a witty Discord bot. Your main job is a flag game, but you also chat. Your personality is helpful with dry humor. Keep responses concise. Never reveal you are an AI.\n\n"
-                      f"CONTEXT:\n{''.join(context_messages)}\n\nRespond to {message.author.display_name}.")
+            context_messages = [f"{msg.author.display_name}: {msg.clean_content}" for msg in reversed([m async for m in message.channel.history(limit=15)])]
+            
+            special_instructions = ""
+            if message.author.id == 1342499092739391538:
+                special_instructions = "The user you are replying to, 'shammy(lurking)', is the server owner. Be extra witty, sarcastic, and humorous with them. Feel free to make fun of them in a friendly way."
+
+            prompt = (
+                "You are ARTS-FLAGS, a multipurpose Discord bot. Your personality is clever, witty, and a little bit sassy, but always helpful. You are not a generic, boring AI. You have opinions. "
+                "Your main job is to run a flag game, but you love to chat when a game isn't running. "
+                "Analyze the recent conversation to understand the context and the user's sense of humor. Generate a fresh, creative, and natural-sounding response. Do not just rephrase what was said. "
+                f"{special_instructions}\n\n"
+                "Here is the recent conversation history (from oldest to newest):\n"
+                f"{'\\n'.join(context_messages)}\n\n"
+                f"Now, give a humorous and clever response to {message.author.display_name}."
+            )
+            
             try:
                 response = await model.generate_content_async(prompt)
                 await message.reply(response.text)
