@@ -185,7 +185,6 @@ async def on_ready():
 async def on_message(message):
     if not message.guild or message.author.bot: return
 
-    # 1. Anti-Spam (Always runs first)
     if not message.author.guild_permissions.manage_messages:
         now = datetime.utcnow().timestamp()
         user_id = message.author.id
@@ -209,7 +208,6 @@ async def on_message(message):
                     await message.channel.send("Tried to timeout a spammer, but I'm missing `Moderate Members` permission.")
             return
 
-    # 2. Chatbot & Master Command Logic
     is_reply_to_bot = message.reference and message.reference.resolved and message.reference.resolved.author == bot.user
     trigger_words = ["bot", "arts", "arts automation"]
     trigger_prefixes = ["!arts", "!ARTS"]
@@ -219,7 +217,6 @@ async def on_message(message):
     if groq_client and should_chat and not game_is_active_here:
         async with message.channel.typing():
             context_history = [msg async for msg in message.channel.history(limit=10)]
-            
             if message.author.id == MASTER_USER_ID and not message.content.startswith(bot.command_prefix):
                 system_prompt = ("You are a command parser. Analyze the user's request. The only command is 'ping'. "
                                  "A ping request must have a user mention/ID and a number. "
@@ -227,16 +224,11 @@ async def on_message(message):
                                  "`{\"command\": \"ping\", \"user_id\": \"<user_id>\", \"amount\": <number>}`. "
                                  "Extract the numerical ID from the mention. For any other request, output ONLY: `{\"command\": \"chat\"}`.")
                 try:
-                    chat_completion = groq_client.chat.completions.create(
-                        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": message.clean_content}],
-                        model="llama3-8b-8192",
-                    )
+                    chat_completion = groq_client.chat.completions.create(messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": message.clean_content}], model="llama3-8b-8192")
                     response_text = chat_completion.choices[0].message.content
                     parsed_json = json.loads(response_text.strip('` \njson'))
-                    
                     if parsed_json.get("command") == "ping":
-                        user_id_to_ping = int(parsed_json.get("user_id"))
-                        amount = int(parsed_json.get("amount"))
+                        user_id_to_ping = int(parsed_json.get("user_id")); amount = int(parsed_json.get("amount"))
                         target_user = await bot.fetch_user(user_id_to_ping)
                         if target_user:
                             await message.channel.send(f"Executing order: Pinging {target_user.mention} {amount} time{'s' if amount != 1 else ''}.")
@@ -250,14 +242,11 @@ async def on_message(message):
             special_instructions = "The user you are replying to is your owner. Be extra witty and sarcastic." if message.author.id == MASTER_USER_ID else ""
             system_prompt = (f"You are a witty and clever Discord bot named ARTS AUTOMATION. Your personality is sassy but helpful. "
                              f"Keep responses very concise (1-2 witty sentences). Avoid long paragraphs. "
-                             f"**Crucially, do not start your reply with 'ARTS AUTOMATION:' or your own name. Just give the direct response.** "
-                             f"{special_instructions}")
-            
+                             f"**Crucially, do not start your reply with 'ARTS AUTOMATION:' or your own name. Just give the direct response.** {special_instructions}")
             messages_for_api = [{"role": "system", "content": system_prompt}]
             for msg in reversed(context_history):
                 role = "assistant" if msg.author == bot.user else "user"
                 messages_for_api.append({"role": role, "content": f"{msg.author.display_name}: {msg.clean_content}"})
-
             try:
                 chat_completion = groq_client.chat.completions.create(messages=messages_for_api, model="llama3-8b-8192")
                 await message.reply(chat_completion.choices[0].message.content)
@@ -265,7 +254,6 @@ async def on_message(message):
             except Exception as e:
                 print(f"Error generating Groq response: {e}")
     
-    # 3. Flag Game Logic
     guild_id = message.guild.id
     if guild_id in active_games and active_games[guild_id].get('channel_id') == message.channel.id:
         if message.content.startswith(bot.command_prefix):
@@ -310,9 +298,7 @@ async def on_message(message):
                 except discord.Forbidden:
                     await message.channel.send(f"**Permissions Error!** I can't apply infection, I'm missing `Manage Nicknames` permission.")
     
-    # 4. Process Commands
     await bot.process_commands(message)
-
 @bot.event
 async def on_member_join(member):
     await check_nickname(member)
@@ -336,8 +322,6 @@ async def check_nickname(member):
             embed.add_field(name="After", value="`Moderated Nickname`", inline=False)
             await log_channel.send(embed=embed)
         except: pass
-
-# --- TASKS ---
 @tasks.loop(minutes=1)
 async def check_infections_task():
     with conn.cursor() as cursor:
@@ -517,11 +501,9 @@ async def gend(ctx, message_id: str):
 async def resetoffenses(ctx, member: discord.Member):
     update_user_data(ctx.guild.id, member.id, 'spam_offenses', 0)
     await ctx.send(f"✅ Reset spam offenses for {member.mention}.")
-@bot.command(name='ping')
-async def ping(ctx, member: discord.Member, amount: int = 1):
-    """Pings a user a specified number of times."""
-    if amount > 10:
-        return await ctx.send("I can't ping more than 10 times, that's just mean.")
+@bot.command(name='fping') # RENAMED
+async def fping(ctx, member: discord.Member, amount: int = 1):
+    if amount > 10: return await ctx.send("I can't ping more than 10 times, that's just mean.")
     for i in range(amount):
         await ctx.send(f"Ping {i+1} for {member.mention}")
         await asyncio.sleep(1)
@@ -530,7 +512,7 @@ async def flag_help(ctx):
     embed = discord.Embed(title="🚩 Flag Quiz Help 🚩", color=discord.Color.blurple())
     embed.add_field(name="Game", value="`?flagstart` `?flagstop` `?flagskip`", inline=False)
     embed.add_field(name="Leaderboards", value="`?lb` (Server) `?glb` (Global)", inline=False)
-    embed.add_field(name="Fun", value="`?profile` `?height` `?serverlore` `?ping`", inline=False)
+    embed.add_field(name="Fun", value="`?profile` `?height` `?serverlore` `?fping`", inline=False)
     embed.add_field(name="Moderation", value="`?resetoffenses` `?flaglog` `?difficulty`", inline=False)
     embed.add_field(name="Giveaways", value="`?gstart` `?greroll` `?gend`", inline=False)
     await ctx.send(embed=embed)
